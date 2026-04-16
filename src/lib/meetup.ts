@@ -57,7 +57,7 @@ const EVENTS_QUERY = gql`
       link
       description
       events(
-        first: 200
+        first: 0
         filter: { status: [PAST, ACTIVE] }
         sort: DESC
       ) {
