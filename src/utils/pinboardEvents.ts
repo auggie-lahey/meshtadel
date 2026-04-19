@@ -1,6 +1,14 @@
 import { pool } from "@/lib/nostr";
 import { nostrRelays, WHITELISTED_PUBKEYS } from "@/config";
 
+// In test mode, use the dynamically injected whitelist
+function getWhitelistedAuthors(): string[] {
+  if (typeof window !== "undefined" && (window as any).__TEST_WHITELIST) {
+    return (window as any).__TEST_WHITELIST;
+  }
+  return WHITELISTED_PUBKEYS;
+}
+
 // Pinboard types
 export interface Pinboard {
   id: string;
@@ -77,49 +85,49 @@ export function getDisplayType(pin: Pin): DisplayType {
 
 export const DISPLAY_TYPE_CONFIG: Record<DisplayType, { icon: string; label: string; color: string; activeColor: string }> = {
   youtube: {
-    icon: ">>",
+    icon: "▶️",
     label: "Videos",
     color: "bg-red-100 text-red-700",
     activeColor: "bg-red-600 text-white",
   },
   podcast: {
-    icon: "##",
+    icon: "🎙️",
     label: "Podcasts",
     color: "bg-purple-100 text-purple-700",
     activeColor: "bg-purple-600 text-white",
   },
   "podcast-episode": {
-    icon: "~",
+    icon: "🎵",
     label: "Episodes",
     color: "bg-indigo-100 text-indigo-700",
     activeColor: "bg-indigo-600 text-white",
   },
   link: {
-    icon: "->",
+    icon: "🔗",
     label: "Links",
     color: "bg-blue-100 text-blue-700",
     activeColor: "bg-blue-600 text-white",
   },
   book: {
-    icon: "Bk",
+    icon: "📚",
     label: "Books",
     color: "bg-amber-100 text-amber-700",
     activeColor: "bg-amber-600 text-white",
   },
   movie: {
-    icon: "Mv",
+    icon: "🎥",
     label: "Movies",
     color: "bg-pink-100 text-pink-700",
     activeColor: "bg-pink-600 text-white",
   },
   paper: {
-    icon: "Pp",
+    icon: "📄",
     label: "Papers",
     color: "bg-teal-100 text-teal-700",
     activeColor: "bg-teal-600 text-white",
   },
   location: {
-    icon: "@",
+    icon: "📍",
     label: "Locations",
     color: "bg-green-100 text-green-700",
     activeColor: "bg-green-600 text-white",
@@ -199,6 +207,12 @@ export function detectContentKind(value: string): DetectedContent {
     return { iTag: `geo:${trimmed.replace(/\s/g, "")}`, kTag: "geo", displayType: "location" };
   }
 
+  // RSS/Atom feed URL
+  if (/\.(xml|rss)(\?|$)/i.test(trimmed) || /\/feed\b/i.test(trimmed)) {
+    const url = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    return { iTag: url, kTag: "podcast", displayType: "podcast" };
+  }
+
   // Default: web URL -- add scheme if missing
   let url = trimmed;
   if (url && !/^https?:\/\//i.test(url)) {
@@ -237,7 +251,7 @@ export async function fetchPinboards(): Promise<Pinboard[]> {
 
     pool.request(relays, {
       kinds: [30067],
-      authors: WHITELISTED_PUBKEYS,
+      authors: getWhitelistedAuthors(),
       limit: 100,
     }).subscribe({
       next: (event) => rawEvents.push(event),
@@ -245,7 +259,7 @@ export async function fetchPinboards(): Promise<Pinboard[]> {
       complete: () => {
         clearTimeout(timeout);
         // Client-side author filter (belts-and-suspenders: some relays ignore `authors`)
-        const authorSet = new Set(WHITELISTED_PUBKEYS);
+        const authorSet = new Set(getWhitelistedAuthors());
         const filtered = rawEvents.filter((e: any) => authorSet.has(e.pubkey));
         const deduped = deduplicateByCoordinate(filtered, 30067);
         const pinboards: Pinboard[] = deduped.map(parsePinboardEvent).filter(Boolean) as Pinboard[];
@@ -259,13 +273,14 @@ export async function fetchPinboards(): Promise<Pinboard[]> {
 export async function fetchFeaturedPins(): Promise<Pin[]> {
   const relays = nostrRelays;
 
-  if (WHITELISTED_PUBKEYS.length === 0) return [];
+  const authors = getWhitelistedAuthors();
+  if (authors.length === 0) return [];
 
   // Fetch all kind 39067 events from whitelisted authors
   // then filter client-side to only include pins referencing our boards
   const boards = await fetchPinboards();
   const boardCoords = new Set(boards.map((b) => b.coordinate));
-  const authorSet = new Set(WHITELISTED_PUBKEYS);
+  const authorSet = new Set(authors);
 
   return new Promise((resolve) => {
     const timeout = setTimeout(() => resolve([]), 15000);
@@ -273,7 +288,7 @@ export async function fetchFeaturedPins(): Promise<Pin[]> {
 
     pool.request(relays, {
       kinds: [39067],
-      authors: WHITELISTED_PUBKEYS,
+      authors,
       limit: 500,
     }).subscribe({
       next: (event) => rawEvents.push(event),

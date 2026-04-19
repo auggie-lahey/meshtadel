@@ -47,17 +47,37 @@ function getSpotifyEpisodeId(url: string): string | null {
   return match ? match[1] : null;
 }
 
-export default function EducationPage() {
-  const { user, hasExtension } = useNostr();
+function getPodcastGuid(externalRef: string): string | null {
+  const match = externalRef.match(/^podcast:item:guid:(.+)$/i);
+  return match ? match[1] : null;
+}
 
-  // Sign an event using the NIP-07 extension
-  const signEvent = async (event: { kind: number; content: string; tags: string[][]; created_at: number }): Promise<Record<string, unknown>> => {
-    if (window.nostr) {
-      const pk = await window.nostr.getPublicKey();
-      return await window.nostr.signEvent({ ...event, pubkey: pk });
-    }
-    throw new Error("No signing method available");
-  };
+function getPodcastFeedGuid(externalRef: string): string | null {
+  const match = externalRef.match(/^podcast:guid:(.+)$/i);
+  return match ? match[1] : null;
+}
+
+function isRssFeed(url: string): boolean {
+  return /\.(xml|rss)(\?|$)/i.test(url) || /\/feed\b/i.test(url);
+}
+
+function getPodcastIndexShowUrl(externalRef: string): string | null {
+  if (isRssFeed(externalRef)) {
+    return `https://podcastindex.org/podcast/${encodeURIComponent(externalRef)}`;
+  }
+  const guid = getPodcastFeedGuid(externalRef);
+  if (guid) return `https://podcastindex.org/podcast/${encodeURIComponent(guid)}`;
+  return null;
+}
+
+function getPodcastIndexEpisodeUrl(externalRef: string): string | null {
+  const guid = getPodcastGuid(externalRef);
+  if (guid) return `https://podcastindex.org/episode/${encodeURIComponent(guid)}`;
+  return null;
+}
+
+export default function EducationPage() {
+  const { user, hasExtension, signEvent } = useNostr();
   const [pinboards, setPinboards] = useState<Pinboard[]>([]);
   const [featuredPins, setFeaturedPins] = useState<Pin[]>([]);
   const [selectedBoard, setSelectedBoard] = useState<Pinboard | null>(null);
@@ -71,18 +91,22 @@ export default function EducationPage() {
   const [editPin, setEditPin] = useState<Pin | null>(null);
   const [sortBy, setSortBy] = useState<"date" | "title">("date");
 
-  useEffect(() => {
-    Promise.all([fetchFeaturedPins(), fetchPinboards()])
-      .then(([pins, boards]) => {
-        setFeaturedPins(pins.sort((a, b) => b.created_at - a.created_at));
-        setPinboards(boards);
-      })
-      .catch(() => {})
-      .finally(() => {
-        setLoadingFeatured(false);
-        setLoadingBoards(false);
-      });
+  const loadAll = useCallback(async () => {
+    setLoadingFeatured(true);
+    setLoadingBoards(true);
+    try {
+      const [pins, boards] = await Promise.all([fetchFeaturedPins(), fetchPinboards()]);
+      setFeaturedPins(pins.sort((a, b) => b.created_at - a.created_at));
+      setPinboards(boards);
+    } catch (err) {
+      logger.warn("Failed to load data:", err);
+    } finally {
+      setLoadingFeatured(false);
+      setLoadingBoards(false);
+    }
   }, []);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
 
   const loadPins = useCallback(async (board: Pinboard) => {
     setLoadingPins(true);
@@ -453,6 +477,46 @@ function FilterBar({
 }
 
 // --- Pin Card ---
+interface PodcastFeedMeta {
+  imageUrl: string | null;
+  websiteUrl: string | null;
+}
+
+const feedMetaCache = new Map<string, PodcastFeedMeta>();
+
+function usePodcastFeedMeta(feedUrl: string | null): PodcastFeedMeta | null {
+  const [meta, setMeta] = useState<PodcastFeedMeta | null>(null);
+
+  useEffect(() => {
+    if (!feedUrl || !isRssFeed(feedUrl)) { setMeta(null); return; }
+    if (feedMetaCache.has(feedUrl)) { setMeta(feedMetaCache.get(feedUrl)!); return; }
+    const controller = new AbortController();
+    // Use CORS proxy since static export can't have API routes
+    const proxyUrl = `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(feedUrl)}`;
+    fetch(proxyUrl, { signal: controller.signal })
+      .then(r => r.text())
+      .then(xml => {
+        let imageUrl: string | null = null;
+        let websiteUrl: string | null = null;
+        const imgMatch = xml.match(/<itunes:image[^>]*href=["']([^"']+)["']/i);
+        if (imgMatch) imageUrl = imgMatch[1];
+        if (!imageUrl) {
+          const imgTagMatch = xml.match(/<image>[\s\S]*?<url>([^<]+)<\/url>/i);
+          if (imgTagMatch) imageUrl = imgTagMatch[1].trim();
+        }
+        const linkMatch = xml.match(/<channel[\s\S]*?<link>([^<]+)<\/link>/i);
+        if (linkMatch) websiteUrl = linkMatch[1].trim();
+        const result: PodcastFeedMeta = { imageUrl, websiteUrl };
+        feedMetaCache.set(feedUrl, result);
+        setMeta(result);
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [feedUrl]);
+
+  return meta;
+}
+
 function PinCard({ pin, onDelete, onEdit }: { pin: Pin; onDelete: () => void; onEdit: () => void }) {
   const url = getPinUrl(pin);
   const dt = getDisplayType(pin);
@@ -461,6 +525,10 @@ function PinCard({ pin, onDelete, onEdit }: { pin: Pin; onDelete: () => void; on
   const rumbleId = dt === "youtube" ? getRumbleId(pin.externalRef || "") : null;
   const isVideo = !!(ytId || vimeoId || rumbleId);
   const spotifyEpisodeId = dt === "podcast-episode" ? getSpotifyEpisodeId(pin.externalRef || "") : null;
+  const podcastIndexShowUrl = dt === "podcast" ? getPodcastIndexShowUrl(pin.externalRef || "") : null;
+  const podcastIndexEpisodeUrl = dt === "podcast-episode" ? getPodcastIndexEpisodeUrl(pin.externalRef || "") : null;
+  const isSpotifyShow = dt === "podcast" && pin.externalRef?.includes("open.spotify.com");
+  const feedMeta = usePodcastFeedMeta(dt === "podcast" && !isSpotifyShow ? pin.externalRef || null : null);
   const cfg = DISPLAY_TYPE_CONFIG[dt];
   const bookIsbn = dt === "book" ? pin.externalRef?.replace(/^isbn:/i, "") : null;
   const doiId = dt === "paper" ? pin.externalRef?.replace(/^doi:/i, "") : null;
@@ -471,7 +539,13 @@ function PinCard({ pin, onDelete, onEdit }: { pin: Pin; onDelete: () => void; on
       ? `https://doi.org/${doiId}`
       : geoCoords
         ? `https://www.google.com/maps?q=${encodeURIComponent(geoCoords)}`
-        : url;
+        : podcastIndexEpisodeUrl
+          ? podcastIndexEpisodeUrl
+          : podcastIndexShowUrl
+            ? podcastIndexShowUrl
+            : url;
+  const feedWebsiteUrl = feedMeta?.websiteUrl;
+  const finalDisplayUrl = feedWebsiteUrl || displayUrl;
 
   return (
     <div
@@ -510,11 +584,11 @@ function PinCard({ pin, onDelete, onEdit }: { pin: Pin; onDelete: () => void; on
         </div>
       )}
 
-      {/* Spotify embed */}
-      {dt === "podcast" && pin.externalRef && (
+      {/* Spotify embed (show) */}
+      {dt === "podcast" && isSpotifyShow && (
         <div className="w-full">
           <iframe
-            src={pin.externalRef.replace("open.spotify.com/show/", "open.spotify.com/embed/show/") + "?utm_source=generator&theme=0"}
+            src={pin.externalRef!.replace("open.spotify.com/show/", "open.spotify.com/embed/show/") + "?utm_source=generator&theme=0"}
             title={pin.title || "Podcast"}
             width="100%"
             height="152"
@@ -526,7 +600,7 @@ function PinCard({ pin, onDelete, onEdit }: { pin: Pin; onDelete: () => void; on
         </div>
       )}
 
-      {/* Podcast Episode embed */}
+      {/* Podcast Episode embed (Spotify) */}
       {dt === "podcast-episode" && spotifyEpisodeId && (
         <div className="w-full">
           <iframe
@@ -540,6 +614,52 @@ function PinCard({ pin, onDelete, onEdit }: { pin: Pin; onDelete: () => void; on
             className="w-full"
           />
         </div>
+      )}
+
+      {/* Podcast fallback card (RSS feed / GUID — no Spotify embed) */}
+      {dt === "podcast" && !isSpotifyShow && (podcastIndexShowUrl || feedMeta) && (
+        <a
+          href={feedMeta?.websiteUrl || podcastIndexShowUrl || "#"}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="w-full flex items-center gap-3 px-4 py-3 bg-gradient-to-r from-purple-50 to-indigo-50 hover:from-purple-100 hover:to-indigo-100 transition-colors"
+        >
+          {feedMeta?.imageUrl ? (
+            <img src={feedMeta.imageUrl} alt={pin.title || "Podcast"} className="w-12 h-12 rounded-lg object-cover shrink-0" loading="lazy" />
+          ) : (
+            <svg className="w-8 h-8 text-purple-600 shrink-0" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 1a9 9 0 0 0-9 9v7c0 1.66 1.34 3 3 3h3v-8H5v-2c0-3.87 3.13-7 7-7s7 3.13 7 7v2h-4v8h3c1.66 0 3-1.34 3-3v-7a9 9 0 0 0-9-9z"/>
+            </svg>
+          )}
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-gray-900 truncate">{pin.title || "Podcast"}</p>
+            <p className="text-xs text-gray-500">{feedMeta?.websiteUrl ? new URL(feedMeta.websiteUrl).hostname : "View on Podcast Index"}</p>
+          </div>
+          <svg className="w-4 h-4 text-gray-400 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z" clipRule="evenodd"/>
+          </svg>
+        </a>
+      )}
+
+      {/* Podcast Episode fallback card (GUID-based, no Spotify) */}
+      {dt === "podcast-episode" && !spotifyEpisodeId && podcastIndexEpisodeUrl && (
+        <a
+          href={podcastIndexEpisodeUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="w-full flex items-center gap-3 px-4 py-3 bg-gradient-to-r from-purple-50 to-indigo-50 hover:from-purple-100 hover:to-indigo-100 transition-colors"
+        >
+          <svg className="w-8 h-8 text-purple-600 shrink-0" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 1a9 9 0 0 0-9 9v7c0 1.66 1.34 3 3 3h3v-8H5v-2c0-3.87 3.13-7 7-7s7 3.13 7 7v2h-4v8h3c1.66 0 3-1.34 3-3v-7a9 9 0 0 0-9-9z"/>
+          </svg>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-gray-900 truncate">{pin.title || "Podcast Episode"}</p>
+            <p className="text-xs text-gray-500">View on Podcast Index</p>
+          </div>
+          <svg className="w-4 h-4 text-gray-400 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z" clipRule="evenodd"/>
+          </svg>
+        </a>
       )}
 
       {/* Book cover */}
@@ -563,9 +683,9 @@ function PinCard({ pin, onDelete, onEdit }: { pin: Pin; onDelete: () => void; on
           {pin.rawEvent && <EventActions event={pin.rawEvent} onDelete={onDelete} onEdit={onEdit} />}
         </div>
 
-        {displayUrl ? (
+        {finalDisplayUrl ? (
           <a
-            href={displayUrl}
+            href={finalDisplayUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="text-lg font-bold text-gray-900 mb-1 hover:text-bitcoin-orange transition-colors block"
@@ -634,6 +754,7 @@ function AddPinModal({
   pubkey?: string;
   signEvent?: (event: { kind: number; content: string; tags: string[][]; created_at: number }) => Promise<Record<string, unknown>>;
 }) {
+  const { user, signEvent } = useNostr();
   const [title, setTitle] = useState(editPin?.title || "");
   const [url, setUrl] = useState(editPin?.externalRef || "");
   const [description, setDescription] = useState(editPin?.content || "");
@@ -670,25 +791,13 @@ function AddPinModal({
     setError("");
 
     try {
-      if (!pubkey && !window.nostr) {
-        setError("You must be logged in to publish.");
+      if (!user) {
+        setError("Please log in to publish.");
         setPublishing(false);
         return;
       }
 
-      // Helper to sign via either NostrContext or window.nostr extension
-      const doSign = async (evt: Record<string, unknown>) => {
-        if (signEvent && pubkey) {
-          return signEvent(evt as { kind: number; content: string; tags: string[][]; created_at: number });
-        }
-        if (window.nostr) {
-          const pk = await window.nostr.getPublicKey();
-          return window.nostr.signEvent({ ...evt, pubkey: pk });
-        }
-        throw new Error("No signing method available");
-      };
-
-      const resolvedPubkey = pubkey || (window.nostr ? await window.nostr.getPublicKey() : "");
+      const pubkey = user.pubkey;
 
       // Auto-create a pinboard if none exists yet ("auto" sentinel)
       let resolvedBoardCoord = boardCoordinate;
@@ -698,7 +807,7 @@ function AddPinModal({
           title: "Education",
           description: "Educational resources",
         });
-        const signedBoard = await doSign(unsignedBoard);
+        const signedBoard = await signEvent(unsignedBoard);
         const boardOk = await publishPinboard(signedBoard);
         if (!boardOk) {
           setError("Failed to create pinboard on relays.");
@@ -707,7 +816,7 @@ function AddPinModal({
         }
         // Construct the coordinate from the signed event
         const dTag = (signedBoard.tags as string[][]).find((t: string[]) => t[0] === "d")?.[1] || "education";
-        resolvedBoardCoord = `30067:${resolvedPubkey}:${dTag}`;
+        resolvedBoardCoord = `30067:${pubkey}:${dTag}`;
       }
 
       // Use detected content kind, but override displayType to match user's selection
@@ -732,9 +841,9 @@ function AddPinModal({
         dTag: isEditing ? (editPin?.rawEvent?.tags as string[][] | undefined)?.find((t) => t[0] === "d")?.[1] : undefined,
       });
 
-      const signedEvent = await doSign(unsignedEvent);
+      const signedEv = await signEvent(unsignedEvent);
 
-      const success = await publishPin(signedEvent);
+      const success = await publishPin(signedEv);
       if (success) {
         onDone();
       } else {
@@ -790,8 +899,8 @@ function AddPinModal({
             {selectedType && (
               <p className="text-xs text-gray-500 mt-1">
                 {selectedType === "youtube" && "Paste a video URL (YouTube, Vimeo, or Rumble)"}
-                {selectedType === "podcast" && "Paste a Spotify podcast URL or podcast:guid:xxx"}
-                {selectedType === "podcast-episode" && "Paste a Spotify episode URL or enter podcast:item:guid:xxx"}
+                {selectedType === "podcast" && "Paste an RSS feed URL (e.g. example.com/feed.xml) or a Spotify show URL"}
+                {selectedType === "podcast-episode" && "Paste a Spotify episode URL or an RSS feed URL"}
                 {selectedType === "link" && "Paste any web URL"}
                 {selectedType === "book" && "Enter an ISBN like isbn:978... or a bare ISBN number"}
                 {selectedType === "movie" && "Enter an ISAN like isan:XXXX-XXXX-XXXX"}
@@ -809,8 +918,8 @@ function AddPinModal({
               onChange={(e) => handleUrlChange(e.target.value)}
               placeholder={
                 selectedType === "youtube" ? "https://youtube.com/watch?v=... or https://vimeo.com/..."
-                : selectedType === "podcast" ? "https://open.spotify.com/show/... or podcast:guid:xxx"
-                : selectedType === "podcast-episode" ? "https://open.spotify.com/episode/... or podcast:item:guid:xxx"
+                : selectedType === "podcast" ? "https://example.com/feed.xml or https://open.spotify.com/show/..."
+                : selectedType === "podcast-episode" ? "https://open.spotify.com/episode/... or RSS feed URL"
                 : selectedType === "link" ? "https://example.com/article"
                 : selectedType === "book" ? "isbn:9780743273565 or bare ISBN"
                 : selectedType === "movie" ? "isan:XXXX-XXXX-XXXX-XXXX"
