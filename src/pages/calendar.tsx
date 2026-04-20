@@ -597,8 +597,8 @@ export default function CalendarPage({
 
             {/* Always show view selector */}
             <div className="bg-white border border-gray-200 rounded-lg p-4 mb-6">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-1 sm:gap-2 flex-wrap">
                   <button
                     onClick={() => setViewMode("month")}
                     className={`px-4 py-2 text-sm font-medium transition-colors rounded-l-lg ${
@@ -645,7 +645,7 @@ export default function CalendarPage({
                 {/* Orange plus button for creating events */}
                 <button
                   onClick={() => setShowCreateForm(true)}
-                  className="inline-flex items-center justify-center w-10 h-10 bg-bitcoin-orange text-white rounded-full hover:bg-bitcoin-orange-hover transition-colors"
+                  className="inline-flex items-center justify-center w-11 h-11 sm:w-10 sm:h-10 bg-bitcoin-orange text-white rounded-full hover:bg-bitcoin-orange-hover transition-colors"
                   title="Create New Event"
                 >
                   <PlusIcon className="w-5 h-5" />
@@ -677,6 +677,20 @@ export default function CalendarPage({
                         Loading events from Nostr...
                       </p>
                     </div>
+                  </div>
+                )}
+
+                {/* Loading skeleton for initial load */}
+                {events.length === 0 && isLoadingNostrEvents && (
+                  <div className="space-y-4">
+                    {[1, 2, 3].map((i) => (
+                      <div key={i} className="animate-pulse bg-white border border-gray-200 rounded-lg p-6">
+                        <div className="h-4 bg-gray-200 rounded w-1/4 mb-3" />
+                        <div className="h-6 bg-gray-200 rounded w-3/4 mb-2" />
+                        <div className="h-4 bg-gray-200 rounded w-1/2 mb-4" />
+                        <div className="h-4 bg-gray-200 rounded w-full" />
+                      </div>
+                    ))}
                   </div>
                 )}
 
