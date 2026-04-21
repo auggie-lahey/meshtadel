@@ -70,3 +70,36 @@ export async function getPubkey(privkeyHex: string): Promise<string> {
   const s = await getSchnorr();
   return bytesToHex(s.getPublicKey(hexToBytes(privkeyHex)));
 }
+
+/** Encode a Nostr address (naddr) per NIP-19. */
+export function naddrEncode(opts: { identifier: string; pubkey: string; kind: number; relays?: string[] }): string {
+  const tlv: { type: number; value: Uint8Array }[] = [];
+
+  // Type 0: identifier (d-tag value)
+  tlv.push({ type: 0, value: new TextEncoder().encode(opts.identifier) });
+  // Type 1: relays
+  if (opts.relays) {
+    for (const relay of opts.relays) {
+      tlv.push({ type: 1, value: new TextEncoder().encode(relay) });
+    }
+  }
+  // Type 2: author (pubkey hex → 32 bytes)
+  tlv.push({ type: 2, value: hexToBytes(opts.pubkey) });
+  // Type 3: kind (4-byte big-endian)
+  const kindBytes = new Uint8Array(4);
+  new DataView(kindBytes.buffer).setUint32(0, opts.kind, false);
+  tlv.push({ type: 3, value: kindBytes });
+
+  // Encode TLV: type (1 byte) + length (1 byte) + value
+  const totalLen = tlv.reduce((sum, e) => sum + 2 + e.value.length, 0);
+  const buf = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const e of tlv) {
+    buf[offset++] = e.type;
+    buf[offset++] = e.value.length;
+    buf.set(e.value, offset);
+    offset += e.value.length;
+  }
+
+  return bech32.encode("naddr", bech32.toWords(buf), 5000);
+}

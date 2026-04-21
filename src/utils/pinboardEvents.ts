@@ -61,15 +61,19 @@ export type ContentType =
   | "unknown";
 
 // Display-level type for UI filtering -- derived from k tag + URL patterns
-export type DisplayType = "youtube" | "podcast" | "podcast-episode" | "link" | "book" | "movie" | "paper" | "location";
+export type DisplayType = "youtube" | "podcast" | "podcast-episode" | "link" | "book" | "movie" | "paper" | "location" | "newsletter";
 
 export function getDisplayType(pin: Pin): DisplayType {
+  // 0. Check content type for article pins
+  if (pin.contentType === "article") return "newsletter";
+
   // 1. Check k tag for non-web types (authoritative per NIP-73)
   const k = pin.externalKind || "";
   if (k === "isbn") return "book";
   if (k === "isan") return "movie";
   if (k === "doi") return "paper";
   if (k === "geo") return "location";
+  if (k === "article") return "newsletter";
   if (k === "podcast:item:guid") return "podcast-episode";
   if (k.startsWith("podcast")) return "podcast";
 
@@ -132,10 +136,16 @@ export const DISPLAY_TYPE_CONFIG: Record<DisplayType, { icon: string; label: str
     color: "bg-green-100 text-green-700",
     activeColor: "bg-green-600 text-white",
   },
+  newsletter: {
+    icon: "📰",
+    label: "Articles",
+    color: "bg-orange-100 text-orange-700",
+    activeColor: "bg-orange-600 text-white",
+  },
 };
 
 // All display types in a stable order for filter bar rendering
-export const ALL_DISPLAY_TYPES: DisplayType[] = ["youtube", "podcast", "podcast-episode", "link", "book", "movie", "paper", "location"];
+export const ALL_DISPLAY_TYPES: DisplayType[] = ["youtube", "podcast", "podcast-episode", "link", "book", "movie", "paper", "location", "newsletter"];
 
 /** Result of auto-detecting content kind from a user-pasted value. */
 export interface DetectedContent {
@@ -364,6 +374,7 @@ export function buildPinEvent(opts: {
   externalKind?: string;
   eventRef?: string;
   eventRelay?: string;
+  articleCoordinate?: string;
   tags?: string[];
   dTag?: string;
 }): Record<string, unknown> {
@@ -380,12 +391,17 @@ export function buildPinEvent(opts: {
 
   if (opts.externalRef) {
     tags.push(["i", opts.externalRef]);
-    if (opts.externalKind) tags.push(["k", opts.externalKind]);
+  }
+  if (opts.externalKind) {
+    tags.push(["k", opts.externalKind]);
   }
   if (opts.eventRef) {
     const eTag = ["e", opts.eventRef];
     if (opts.eventRelay) eTag.push(opts.eventRelay);
     tags.push(eTag);
+  }
+  if (opts.articleCoordinate) {
+    tags.push(["a", opts.articleCoordinate]);
   }
   if (opts.title) tags.push(["title", opts.title]);
   if (opts.tags) {
@@ -520,6 +536,16 @@ function parsePinEvent(event: any): Pin | null {
     pin.eventRef = eTag[1];
     pin.eventRelay = eTag[2];
     pin.contentType = "note";
+    // Check for k tag to override content type (e.g. k=article for newsletter pins)
+    if (kTag) {
+      pin.externalKind = kTag[1];
+      if (kTag[1] === "article") pin.contentType = "article";
+    }
+    // Also store article coordinate if present
+    if (aTag) {
+      pin.coordinateRef = aTag[1];
+      pin.coordinateRelay = aTag[2];
+    }
   } else if (aTag) {
     pin.coordinateRef = aTag[1];
     pin.coordinateRelay = aTag[2];

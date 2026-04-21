@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useCallback } from "react";
 import Head from "next/head";
-import { config, siteConfig, basePath } from "@/config";
+import ReactMarkdown from "react-markdown";
+import { config, siteConfig, basePath, nostrRelays } from "@/config";
+import { naddrEncode } from "@/utils/bech32";
+import { buildNewsletterEvent, publishNewsletter } from "@/utils/newsletterEvents";
 import { fetchLivestreams, Livestream } from "@/utils/livestreams";
 import LivestreamPlayer from "@/components/LivestreamPlayer";
 import {
@@ -92,6 +95,7 @@ export default function EducationPage() {
   const [showAddPin, setShowAddPin] = useState(false);
   const [editPin, setEditPin] = useState<Pin | null>(null);
   const [sortBy, setSortBy] = useState<"date" | "title">("date");
+  const [selectedArticle, setSelectedArticle] = useState<Pin | null>(null);
   const [livestreams, setLivestreams] = useState<Livestream[]>([]);
 
   const loadAll = useCallback(async () => {
@@ -213,6 +217,74 @@ export default function EducationPage() {
           </p>
         </div>
 
+        {/* Article detail modal overlay */}
+        {selectedArticle && (() => {
+          // Build naddr for Yakihonne link from the article coordinate
+          let yakihonneUrl = "";
+          const coordRef = selectedArticle.coordinateRef;
+          if (coordRef) {
+            try {
+              const parts = coordRef.split(":");
+              const kind = parseInt(parts[0], 10);
+              const author = parts[1];
+              const identifier = parts[2];
+              if (identifier && author) {
+                const naddr = naddrEncode({ identifier, pubkey: author, kind, relays: nostrRelays });
+                yakihonneUrl = `https://yakihonne.com/article/${naddr}`;
+              }
+            } catch (e) {
+              console.error("naddr encode error:", e);
+            }
+          }
+          // Fallback: use eventRef (hex event ID) if naddr failed
+          if (!yakihonneUrl && selectedArticle.eventRef) {
+            yakihonneUrl = `https://yakihonne.com/article/${selectedArticle.eventRef}`;
+          }
+          return (
+            <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto" onClick={() => setSelectedArticle(null)}>
+              <div
+                className="bg-white rounded-xl w-full max-w-3xl p-6 shadow-xl my-8"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded bg-orange-100 text-orange-700">
+                      📰 Article
+                    </span>
+                    <span className="text-xs text-gray-400">
+                      {new Date(selectedArticle.created_at * 1000).toLocaleDateString()}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setSelectedArticle(null)}
+                    className="text-gray-400 hover:text-gray-600 text-xl font-bold"
+                  >
+                    &times;
+                  </button>
+                </div>
+                <h2 className="text-2xl font-bold text-gray-900 mb-4">{selectedArticle.title}</h2>
+                {selectedArticle.content && (
+                  <div className="prose prose-sm max-w-none text-gray-700 mb-4">
+                    <ReactMarkdown>{selectedArticle.content}</ReactMarkdown>
+                  </div>
+                )}
+                <div className="pt-4 border-t border-gray-100 flex items-center gap-4">
+                  {yakihonneUrl && (
+                    <a
+                      href={yakihonneUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-sm text-bitcoin-orange hover:underline font-semibold"
+                    >
+                      Open in Yakihonne &rarr;
+                    </a>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Active Livestreams */}
         <LivestreamPlayer streams={livestreams} />
 
@@ -275,7 +347,7 @@ export default function EducationPage() {
             {filteredPins.length > 0 && (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {filteredPins.map((pin) => (
-                  <PinCard key={pin.id} pin={pin} onDelete={() => handleDeletePin(pin)} onEdit={() => handleEditPin(pin)} />
+                  <PinCard key={pin.id} pin={pin} onDelete={() => handleDeletePin(pin)} onEdit={() => handleEditPin(pin)} onOpenArticle={setSelectedArticle} />
                 ))}
               </div>
             )}
@@ -349,7 +421,7 @@ export default function EducationPage() {
                     />
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                       {filteredPins.map((pin) => (
-                        <PinCard key={pin.id} pin={pin} onDelete={() => handleDeletePin(pin)} onEdit={() => handleEditPin(pin)} />
+                        <PinCard key={pin.id} pin={pin} onDelete={() => handleDeletePin(pin)} onEdit={() => handleEditPin(pin)} onOpenArticle={setSelectedArticle} />
                       ))}
                     </div>
                   </>
@@ -531,7 +603,7 @@ function usePodcastFeedMeta(feedUrl: string | null): PodcastFeedMeta | null {
   return meta;
 }
 
-function PinCard({ pin, onDelete, onEdit }: { pin: Pin; onDelete: () => void; onEdit: () => void }) {
+function PinCard({ pin, onDelete, onEdit, onOpenArticle }: { pin: Pin; onDelete: () => void; onEdit: () => void; onOpenArticle?: (pin: Pin) => void }) {
   const url = getPinUrl(pin);
   const dt = getDisplayType(pin);
   const ytId = dt === "youtube" ? getYouTubeId(pin.externalRef || "") : null;
@@ -697,7 +769,21 @@ function PinCard({ pin, onDelete, onEdit }: { pin: Pin; onDelete: () => void; on
           {pin.rawEvent && <EventActions event={pin.rawEvent} onDelete={onDelete} onEdit={onEdit} />}
         </div>
 
-        {finalDisplayUrl ? (
+        {dt === "newsletter" && onOpenArticle ? (
+          <button
+            onClick={() => onOpenArticle(pin)}
+            className="text-left w-full"
+          >
+            <h4 className="text-lg font-bold text-gray-900 mb-1 hover:text-bitcoin-orange transition-colors">
+              {pin.title || "Untitled"}
+            </h4>
+            {pin.content && (
+              <p className="text-sm text-gray-600 line-clamp-3 mb-2">
+                {pin.content.replace(/[#*_`\[\]>]/g, "").replace(/\n+/g, " ").slice(0, 200)}
+              </p>
+            )}
+          </button>
+        ) : finalDisplayUrl ? (
           <a
             href={finalDisplayUrl}
             target="_blank"
@@ -716,7 +802,7 @@ function PinCard({ pin, onDelete, onEdit }: { pin: Pin; onDelete: () => void; on
           </h4>
         )}
 
-        {pin.content && pin.title && (
+        {dt !== "newsletter" && pin.content && pin.title && (
           <p className="text-sm text-gray-600 line-clamp-2 mb-2">{pin.content}</p>
         )}
 
@@ -768,9 +854,12 @@ function AddPinModal({
   const [title, setTitle] = useState(editPin?.title || "");
   const [url, setUrl] = useState(editPin?.externalRef || "");
   const [description, setDescription] = useState(editPin?.content || "");
+  const [summary, setSummary] = useState("");
   const [tags, setTags] = useState(editPin?.tags?.join(", ") || "");
   const [publishing, setPublishing] = useState(false);
   const [error, setError] = useState("");
+  const [showPreview, setShowPreview] = useState(false);
+  const [newsletterMode, setNewsletterMode] = useState<"create" | "existing">("create");
   const [selectedType, setSelectedType] = useState<DisplayType | null>(
     editPin ? getDisplayType(editPin) : null
   );
@@ -793,8 +882,10 @@ function AddPinModal({
   };
 
   const handlePublish = async () => {
-    if (!url.trim()) { setError("URL or identifier is required"); return; }
-    if (!title.trim()) { setError("Title is required"); return; }
+    if (selectedType !== "newsletter" && selectedType !== "link" && !url.trim()) { setError("URL or identifier is required"); return; }
+    if (!title.trim() && selectedType !== "newsletter") { setError("Title is required"); return; }
+    if (selectedType === "newsletter" && newsletterMode === "create" && !description.trim()) { setError("Newsletter content is required"); return; }
+    if (selectedType === "newsletter" && newsletterMode === "existing" && !url.trim()) { setError("naddr or event ID is required"); return; }
     if (!selectedType) { setError("Please select a content type"); return; }
 
     setPublishing(true);
@@ -829,6 +920,67 @@ function AddPinModal({
         resolvedBoardCoord = `30067:${pubkey}:${dTag}`;
       }
 
+      // Newsletter flow
+      if (selectedType === "newsletter") {
+        const tagList = tags.split(",").map((t) => t.trim()).filter(Boolean);
+        let articleId: string;
+        let articleCoordinate: string | undefined;
+
+        if (newsletterMode === "create") {
+          // Create new kind 30023 article
+          const existingDTag = isEditing
+            ? (editPin?.rawEvent?.tags as string[][] | undefined)?.find((t) => t[0] === "d")?.[1]
+            : undefined;
+          const unsignedArticle = buildNewsletterEvent({
+            title: title.trim(),
+            content: description.trim(),
+            description: summary.trim(),
+            tags: tagList,
+            dTag: existingDTag,
+          });
+          const signedArticle = await signEvent(unsignedArticle as { kind: number; content: string; tags: string[][]; created_at: number });
+          await publishNewsletter(signedArticle);
+          articleId = (signedArticle as any).id;
+          // Store article coordinate for naddr link
+          const articleDTag = (signedArticle.tags as string[][]).find((t: string[]) => t[0] === "d")?.[1] || "";
+          articleCoordinate = `30023:${pubkey}:${articleDTag}`;
+        } else {
+          // Pin existing article — use the URL as the event reference
+          articleId = url.trim();
+        }
+
+        // Pin the article to the education board
+        let resolvedBoardCoord = boardCoordinate;
+        if (boardCoordinate === "auto" || !boardCoordinate) {
+          const unsignedBoard = buildPinboardEvent({
+            dTag: "education",
+            title: "Education",
+            description: "Educational resources",
+          });
+          const signedBoard = await signEvent(unsignedBoard as { kind: number; content: string; tags: string[][]; created_at: number });
+          await publishPinboard(signedBoard);
+          const dTag = (signedBoard.tags as string[][]).find((t: string[]) => t[0] === "d")?.[1] || "education";
+          resolvedBoardCoord = `30067:${pubkey}:${dTag}`;
+        }
+        const unsignedPin = buildPinEvent({
+          boardCoordinate: resolvedBoardCoord,
+          content: description.trim(),
+          title: title.trim(),
+          eventRef: articleId,
+          eventRelay: nostrRelays[0],
+          externalKind: "article",
+          articleCoordinate,
+          tags: tagList,
+          dTag: isEditing ? (editPin?.rawEvent?.tags as string[][] | undefined)?.find((t) => t[0] === "d")?.[1] : undefined,
+        });
+        const signedPin = await signEvent(unsignedPin as { kind: number; content: string; tags: string[][]; created_at: number });
+        await publishPin(signedPin);
+        onDone();
+        setPublishing(false);
+        return;
+      }
+
+      // Regular pin flow
       // Use detected content kind, but override displayType to match user's selection
       let { iTag, kTag } = detectContentKind(url);
       // If the user explicitly chose a type that conflicts with detection, respect user choice
@@ -866,9 +1018,9 @@ function AddPinModal({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onCancel}>
+    <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto" onClick={onCancel}>
       <div
-        className="bg-white rounded-lg max-w-md w-full p-6 shadow-xl"
+        className={`bg-white rounded-lg w-full p-6 shadow-xl my-8 ${selectedType === "newsletter" ? "max-w-2xl" : "max-w-md"}`}
         data-testid="add-pin-modal"
         onClick={(e) => e.stopPropagation()}
       >
@@ -916,9 +1068,54 @@ function AddPinModal({
                 {selectedType === "movie" && "Enter an ISAN like isan:XXXX-XXXX-XXXX"}
                 {selectedType === "paper" && "Enter a DOI like doi:10.xxx or 10.xxx/yyy"}
                 {selectedType === "location" && `Enter coordinates like geo:${siteConfig.organization.coordinates.lat},${siteConfig.organization.coordinates.lon} or lat,lon`}
+                {selectedType === "newsletter" && "Write an article or pin an existing long-form article"}
               </p>
             )}
           </div>
+          {selectedType === "newsletter" && (
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setNewsletterMode("create")}
+                className={`px-3 py-1 text-xs rounded font-medium ${newsletterMode === "create" ? "bg-bitcoin-orange text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
+              >
+                Create New
+              </button>
+              <button
+                type="button"
+                onClick={() => setNewsletterMode("existing")}
+                className={`px-3 py-1 text-xs rounded font-medium ${newsletterMode === "existing" ? "bg-bitcoin-orange text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
+              >
+                Pin Existing (naddr)
+              </button>
+            </div>
+          )}
+          {selectedType === "newsletter" && newsletterMode === "create" && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+              <input
+                data-testid="pin-summary"
+                type="text"
+                value={summary}
+                onChange={(e) => setSummary(e.target.value)}
+                placeholder="Brief summary of the article"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-bitcoin-orange focus:border-transparent"
+              />
+            </div>
+          )}
+          {selectedType === "newsletter" && newsletterMode === "existing" && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Article naddr or event ID *</label>
+            <input
+              type="text"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="naddr1... or hex event ID"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-bitcoin-orange focus:border-transparent"
+            />
+          </div>
+          )}
+          {selectedType !== "newsletter" && (
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">URL or Identifier *</label>
             <input
@@ -945,16 +1142,43 @@ function AddPinModal({
               </p>
             )}
           </div>
+          )}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-            <textarea
-              data-testid="pin-description"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Brief description of this resource"
-              rows={2}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-bitcoin-orange focus:border-transparent"
-            />
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {selectedType === "newsletter" && newsletterMode === "create" ? "Content (Markdown) *" : "Description"}
+            </label>
+            {selectedType === "newsletter" && newsletterMode === "create" && (
+              <div className="flex gap-2 mb-2">
+                <button
+                  type="button"
+                  onClick={() => setShowPreview(false)}
+                  className={`px-3 py-1 text-xs rounded ${!showPreview ? "bg-bitcoin-orange text-white" : "bg-gray-100 text-gray-600"}`}
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowPreview(true)}
+                  className={`px-3 py-1 text-xs rounded ${showPreview ? "bg-bitcoin-orange text-white" : "bg-gray-100 text-gray-600"}`}
+                >
+                  Preview
+                </button>
+              </div>
+            )}
+            {selectedType === "newsletter" && showPreview ? (
+              <div className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm min-h-[200px] max-h-[400px] overflow-y-auto prose prose-sm prose-headings:text-gray-900 prose-h1:text-2xl prose-h1:font-bold prose-h1:border-b prose-h1:border-gray-200 prose-h1:pb-1 prose-h2:text-xl prose-h2:font-semibold prose-h3:text-lg prose-h3:font-semibold prose-p:text-gray-700 prose-code:bg-gray-100 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-sm prose-code:font-mono prose-code:text-orange-700 prose-pre:bg-gray-900 prose-pre:text-gray-100">
+                <ReactMarkdown>{description}</ReactMarkdown>
+              </div>
+            ) : (
+              <textarea
+                data-testid="pin-description"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder={selectedType === "newsletter" && newsletterMode === "create" ? "# My Newsletter\n\nWrite your content here using **Markdown**..." : "Brief description of this resource"}
+                rows={selectedType === "newsletter" && newsletterMode === "create" ? 12 : 2}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-bitcoin-orange focus:border-transparent font-mono"
+              />
+            )}
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Tags (comma-separated)</label>
