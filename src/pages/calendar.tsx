@@ -667,6 +667,8 @@ export default function CalendarPage({
                 onEventClick={setSelectedEvent}
                 currentView={viewMode}
                 getEventColor={getEventColor}
+                signEvent={signEvent}
+                pubkey={user?.pubkey}
               />
             )}
 
@@ -889,6 +891,8 @@ export default function CalendarPage({
         <EventDetailsModal
           event={selectedEvent}
           onClose={() => setSelectedEvent(null)}
+          signEvent={signEvent}
+          pubkey={user?.pubkey}
         />
 
         {/* Success Popup */}
