@@ -10,6 +10,24 @@ import { config, nostrRelays, getWhitelistFilter, siteConfig } from "@/config";
 import { fetchZapTotal } from "@/utils/zaps";
 import type { Icon, LatLngBounds, DivIcon } from "leaflet";
 import { getEventHash, type NostrEvent } from "applesauce-core/helpers/event";
+import ListingCard from "@/components/ListingCard";
+import ListingForm from "@/components/ListingForm";
+import ListingDetailModal from "@/components/ListingDetailModal";
+import CartBadge from "@/components/CartBadge";
+import ZapModal from "@/components/ZapModal";
+import { CartProvider, useCart } from "@/contexts/CartContext";
+import type { CartItem } from "@/contexts/CartContext";
+
+/** Extended cart item with converted sats total for checkout */
+interface CheckoutItem extends CartItem {
+  satsTotal: number;
+}
+import { fiatToSats } from "@/utils/prices";
+import { sendOrderDM } from "@/utils/orderDM";
+import {
+  fetchClassifiedListings,
+} from "@/utils/classifiedEvents";
+import type { ClassifiedListing } from "@/types/classifieds";
 
 // Relay configuration for Nostr operations
 const RELAYS = nostrRelays;
@@ -71,7 +89,17 @@ type SortField = keyof NostrVendor | "submitterName" | "zaps";
 type SortDirection = "asc" | "desc";
 
 export default function ShopPage() {
+  return (
+    <CartProvider>
+      <ShopContent />
+    </CartProvider>
+  );
+}
+
+function ShopContent() {
   const { user, signEvent } = useNostr();
+  const { addToCart, isInCart } = useCart();
+  const [view, setView] = useState<"vendors" | "listings">("listings");
   const [sortField, setSortField] = useState<SortField>("zaps");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [filters, setFilters] = useState<Record<string, string>>({
@@ -100,6 +128,101 @@ export default function ShopPage() {
   const [btcMapVendors, setBTCMapVendors] = useState<BTCMapVendor[]>([]);
   const [isLoadingBTCMap, setIsLoadingBTCMap] = useState(false);
   const [btcMapError, setBTCMapError] = useState<string | null>(null);
+
+  // Classified listings state
+  const [listings, setListings] = useState<ClassifiedListing[]>([]);
+  const [isLoadingListings, setIsLoadingListings] = useState(false);
+  const [listingsError, setListingsError] = useState<string | null>(null);
+  const [showListingForm, setShowListingForm] = useState(false);
+  const [editListing, setEditListing] = useState<ClassifiedListing | null>(null);
+  const [isEditListing, setIsEditListing] = useState(false);
+  const [listingSuccess, setListingSuccess] = useState<{
+    eventId: string;
+    naddr: string;
+  } | null>(null);
+  const [selectedListing, setSelectedListing] = useState<ClassifiedListing | null>(null);
+
+  // Buy Now — zap target for instant purchase
+  const [zapTarget, setZapTarget] = useState<{
+    pubkey: string;
+    eventId: string;
+    amount: number;
+  } | null>(null);
+
+  // Cart checkout queue — items to zap sequentially
+  const [checkoutQueue, setCheckoutQueue] = useState<CheckoutItem[]>([]);
+  const { items: cartItems, removeFromCart } = useCart();
+
+  /** Start cart checkout: convert prices to sats and queue items */
+  const handleCheckout = useCallback(async () => {
+    if (cartItems.length === 0) return;
+    const queue: CheckoutItem[] = [];
+    for (const item of cartItems) {
+      if (!item.price) continue; // skip free items
+      const sats = await fiatToSats(
+        parseFloat(item.price.amount) * item.quantity,
+        item.price.currency,
+      );
+      queue.push({ ...item, satsTotal: sats });
+    }
+    setCheckoutQueue(queue);
+  }, [cartItems]);
+
+  // When checkout queue has items and no active zap, start the first one
+  useEffect(() => {
+    if (checkoutQueue.length > 0 && !zapTarget) {
+      const next = checkoutQueue[0];
+      setZapTarget({
+        pubkey: next.pubkey,
+        eventId: next.listingId,
+        amount: next.satsTotal,
+      });
+    }
+  }, [checkoutQueue, zapTarget]);
+
+  /** After a zap is confirmed during checkout, advance the queue */
+  const handleCheckoutZapConfirmed = useCallback(() => {
+    if (checkoutQueue.length > 0) {
+      const paidItem = checkoutQueue[0];
+      // Send order DM to seller
+      if (user?.pubkey) {
+        const listing = listings.find((l) => l.id === paidItem.listingId);
+        if (listing) {
+          sendOrderDM({
+            sellerPubkey: paidItem.pubkey,
+            buyerPubkey: user.pubkey,
+            listingTitle: paidItem.title,
+            listingCoordinate: `30402:${paidItem.pubkey}:${listings.find((l) => l.id === paidItem.listingId)?.dTag || ""}`,
+            amountSats: paidItem.satsTotal,
+          });
+        }
+      }
+      // Remove paid item from cart and queue
+      removeFromCart(paidItem.listingId);
+      const remaining = checkoutQueue.slice(1);
+      setCheckoutQueue(remaining);
+      setZapTarget(null);
+    }
+  }, [checkoutQueue, removeFromCart, listings, user?.pubkey]);
+
+  /** Cancel checkout — clear queue and zap target */
+  const handleCheckoutCancel = useCallback(() => {
+    // Remove just the current item from queue, try next
+    if (checkoutQueue.length > 0) {
+      const remaining = checkoutQueue.slice(1);
+      setCheckoutQueue(remaining);
+      setZapTarget(null);
+    } else {
+      setZapTarget(null);
+    }
+  }, [checkoutQueue]);
+
+  // Classifieds filter/sort state
+  const [listingSearch, setListingSearch] = useState("");
+  const [listingCategory, setListingCategory] = useState("");
+  const [listingStatus, setListingStatus] = useState<"all" | "active" | "sold">("all");
+  const [listingSort, setListingSort] = useState<"newest" | "oldest" | "price_low" | "price_high" | "zaps">("newest");
+  const [listingZapTotals, setListingZapTotals] = useState<Record<string, number>>({});
 
   // Fetch zap totals for Nostr vendors when they load
   useEffect(() => {
@@ -360,6 +483,39 @@ export default function ShopPage() {
     fetchBTCMapData();
   }, []);
 
+  // Fetch classified listings when on the listings tab
+  useEffect(() => {
+    if (view !== "listings") return;
+    const fetchListings = async () => {
+      setIsLoadingListings(true);
+      setListingsError(null);
+      try {
+        const data = await fetchClassifiedListings();
+        setListings(data);
+      } catch (error) {
+        setListingsError(
+          error instanceof Error ? error.message : "Failed to fetch listings",
+        );
+      } finally {
+        setIsLoadingListings(false);
+      }
+    };
+    fetchListings();
+  }, [view, listingSuccess]);
+
+  // Fetch zap totals for classified listings
+  useEffect(() => {
+    if (listings.length === 0) return;
+    let cancelled = false;
+    const totals: Record<string, number> = {};
+    Promise.all(
+      listings.map((l) =>
+        fetchZapTotal(l.id, l.pubkey).then((t) => { if (t > 0) totals[l.id] = t; }),
+      ),
+    ).then(() => { if (!cancelled) setListingZapTotals(totals); });
+    return () => { cancelled = true; };
+  }, [listings]);
+
   // Apply filters and sorting to all vendors
   const filteredAndSortedVendors = useMemo(() => {
     let result = [...nostrVendors, ...btcMapVendors];
@@ -547,6 +703,47 @@ export default function ShopPage() {
     }
   };
 
+  // Handle classified listing deletion
+  const handleDeleteListing = async (listing: ClassifiedListing) => {
+    if (!user || !pool) {
+      alert("You must be logged in to delete listings.");
+      return;
+    }
+
+    try {
+      const deleteEventTemplate = {
+        kind: 5,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ["e", listing.id],
+          ["k", "30402"],
+        ],
+        content: "Deleted classified listing",
+      };
+
+      const signedEvent = await signEvent(deleteEventTemplate as any);
+      const signedRecord = signedEvent as Record<string, unknown>;
+      const deleteEvent = {
+        ...signedEvent,
+        id:
+          (signedRecord.id as string) ||
+          getEventHash(signedEvent as NostrEvent),
+      } as NostrEvent;
+
+      const responses = await pool.publish(RELAYS, deleteEvent);
+      const successfulResponses = responses.filter((r) => r.ok);
+
+      if (successfulResponses.length === 0) {
+        throw new Error("Failed to publish to any relay");
+      }
+
+      setListings((prev) => prev.filter((l) => l.id !== listing.id));
+    } catch (error) {
+      logger.error("Error deleting listing:", error);
+      alert("Failed to delete listing. Please try again.");
+    }
+  };
+
   // Create custom pin icon
   const createPinIcon = useCallback((
     hasLightning: boolean,
@@ -614,8 +811,105 @@ export default function ShopPage() {
     ]),
   );
 
+  // Filter and sort classified listings
+  const filteredListings = useMemo(() => {
+    let result = [...listings];
+
+    // Hide hidden listings from everyone except the owner
+    result = result.filter(
+      (l) => l.status !== "hidden" || (user && l.pubkey === user.pubkey),
+    );
+
+    // Search filter (title, description, location)
+    if (listingSearch.trim()) {
+      const q = listingSearch.toLowerCase();
+      result = result.filter(
+        (l) =>
+          l.title.toLowerCase().includes(q) ||
+          (l.description && l.description.toLowerCase().includes(q)) ||
+          (l.location && l.location.toLowerCase().includes(q)),
+      );
+    }
+
+    // Category filter
+    if (listingCategory) {
+      result = result.filter((l) => l.tags.includes(listingCategory));
+    }
+
+    // Status filter
+    if (listingStatus !== "all") {
+      result = result.filter((l) => l.status === listingStatus);
+    }
+
+    // Sort
+    result.sort((a, b) => {
+      switch (listingSort) {
+        case "oldest":
+          return a.createdAt - b.createdAt;
+        case "price_low": {
+          const aP = a.price ? parseFloat(a.price.amount) : Infinity;
+          const bP = b.price ? parseFloat(b.price.amount) : Infinity;
+          return aP - bP;
+        }
+        case "price_high": {
+          const aP = a.price ? parseFloat(a.price.amount) : -Infinity;
+          const bP = b.price ? parseFloat(b.price.amount) : -Infinity;
+          return bP - aP;
+        }
+        case "zaps": {
+          const aZ = listingZapTotals[a.id] || 0;
+          const bZ = listingZapTotals[b.id] || 0;
+          return bZ - aZ;
+        }
+        case "newest":
+        default:
+          return b.createdAt - a.createdAt;
+      }
+    });
+
+    return result;
+  }, [listings, listingSearch, listingCategory, listingStatus, listingSort, listingZapTotals]);
+
+  // Extract unique categories from all listings
+  const allListingCategories = useMemo(() => {
+    const cats = new Set<string>();
+    for (const l of listings) {
+      for (const t of l.tags) cats.add(t);
+    }
+    return Array.from(cats).sort();
+  }, [listings]);
+
   return (
     <div className="container mx-auto px-4 py-12">
+      {/* Tab Navigation */}
+      <div className="flex justify-center gap-4 mb-10">
+        <button
+          data-testid="tab-vendors"
+          onClick={() => setView("vendors")}
+          className={`px-6 py-2 rounded-lg font-semibold transition-colors ${
+            view === "vendors"
+              ? "bg-bitcoin-orange text-white"
+              : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+          }`}
+        >
+          Vendors
+        </button>
+        <button
+          data-testid="tab-listings"
+          onClick={() => setView("listings")}
+          className={`px-6 py-2 rounded-lg font-semibold transition-colors ${
+            view === "listings"
+              ? "bg-bitcoin-orange text-white"
+              : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+          }`}
+        >
+          Classifieds
+        </button>
+      </div>
+
+      {/* ===== VENDORS TAB ===== */}
+      {view === "vendors" && (
+      <>
       {/* Loading State */}
       {(isLoadingNostr || isLoadingBTCMap) &&
         filteredAndSortedVendors.length === 0 && (
@@ -1310,6 +1604,371 @@ export default function ShopPage() {
           editVendor={editVendor}
           isEdit={isEdit}
         />
+      )}
+      </>
+      )}
+
+      {/* ===== CLASSIFIEDS TAB ===== */}
+      {view === "listings" && (
+        <>
+          {/* Loading State */}
+          {isLoadingListings && listings.length === 0 && (
+            <div className="text-center py-16">
+              <div className="text-6xl mb-4">📋</div>
+              <div className="text-lg text-gray-600 mb-2">
+                Loading classified listings...
+              </div>
+              <div className="animate-spin inline-block w-8 h-8 border-4 border-bitcoin-orange border-t-transparent rounded-full"></div>
+            </div>
+          )}
+
+          {/* Filter and Sort Controls */}
+          {listings.length > 0 && (
+            <div className="bg-white rounded-lg shadow-md p-6 mb-8">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+                {/* Search */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Search
+                  </label>
+                  <input
+                    type="text"
+                    data-testid="listing-search"
+                    value={listingSearch}
+                    onChange={(e) => setListingSearch(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-bitcoin-orange focus:border-transparent"
+                    placeholder="Search listings..."
+                  />
+                </div>
+
+                {/* Category Filter */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Category
+                  </label>
+                  <select
+                    data-testid="listing-category-filter"
+                    value={listingCategory}
+                    onChange={(e) => setListingCategory(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-bitcoin-orange focus:border-transparent"
+                  >
+                    <option value="">All Categories</option>
+                    {allListingCategories.map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Status Filter */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Status
+                  </label>
+                  <select
+                    data-testid="listing-status-filter"
+                    value={listingStatus}
+                    onChange={(e) =>
+                      setListingStatus(e.target.value as "all" | "active" | "sold")
+                    }
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-bitcoin-orange focus:border-transparent"
+                  >
+                    <option value="all">All Statuses</option>
+                    <option value="active">Active</option>
+                    <option value="sold">Sold</option>
+                  </select>
+                </div>
+
+                {/* Sort */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Sort By
+                  </label>
+                  <select
+                    data-testid="listing-sort"
+                    value={listingSort}
+                    onChange={(e) =>
+                      setListingSort(
+                        e.target.value as "newest" | "oldest" | "price_low" | "price_high",
+                      )
+                    }
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-bitcoin-orange focus:border-transparent"
+                  >
+                    <option value="zaps">⚡ Zaps</option>
+                    <option value="newest">Newest First</option>
+                    <option value="oldest">Oldest First</option>
+                    <option value="price_low">Price: Low to High</option>
+                    <option value="price_high">Price: High to Low</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Results Count */}
+              <div className="text-sm text-gray-600">
+                Showing{" "}
+                <span className="font-semibold text-bitcoin-orange">
+                  {filteredListings.length}
+                </span>{" "}
+                of {listings.length} listings
+              </div>
+            </div>
+          )}
+
+          {/* Listings Grid */}
+          {filteredListings.length > 0 && (
+            <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+              {filteredListings.map((listing) => (
+                <ListingCard
+                  key={listing.id}
+                  listing={listing}
+                  zapTotal={listingZapTotals[listing.id] || 0}
+                  onClick={() => setSelectedListing(listing)}
+                  onDelete={
+                    user && listing.pubkey === user.pubkey
+                      ? () => {
+                          if (
+                            window.confirm(
+                              `Are you sure you want to delete "${listing.title}"?`,
+                            )
+                          ) {
+                            handleDeleteListing(listing);
+                          }
+                        }
+                      : undefined
+                  }
+                  onEdit={
+                    user && listing.pubkey === user.pubkey
+                      ? () => {
+                          setEditListing(listing);
+                          setIsEditListing(true);
+                          setShowListingForm(true);
+                        }
+                      : undefined
+                  }
+                  onAddToCart={() => addToCart(listing)}
+                  onBuyNow={
+                    listing.price
+                      ? async () => {
+                          const amount = await fiatToSats(
+                            parseFloat(listing.price!.amount),
+                            listing.price!.currency,
+                          );
+                          setZapTarget({
+                            pubkey: listing.pubkey,
+                            eventId: listing.id,
+                            amount,
+                          });
+                        }
+                      : undefined
+                  }
+                  pubkey={user?.pubkey}
+                />
+              ))}
+            </div>
+          )}
+
+          {/* No results after filtering */}
+          {listings.length > 0 && filteredListings.length === 0 && (
+            <div className="text-center py-12">
+              <div className="text-4xl mb-3">🔍</div>
+              <p className="text-lg text-gray-600">
+                No listings match your filters.
+              </p>
+              <button
+                onClick={() => {
+                  setListingSearch("");
+                  setListingCategory("");
+                  setListingStatus("all");
+                }}
+                className="mt-3 text-bitcoin-orange hover:underline text-sm"
+              >
+                Clear filters
+              </button>
+            </div>
+          )}
+
+          {/* Empty State (no listings at all) */}
+          {!isLoadingListings && listings.length === 0 && !listingsError && (
+            <div className="text-center py-16">
+              <div className="text-6xl mb-4">📋</div>
+              <div className="text-xl font-bold text-gray-800 mb-2">
+                No Classified Listings Yet
+              </div>
+              <div className="text-lg text-gray-600 mb-6">
+                Be the first to post a classified listing!
+              </div>
+              <button
+                onClick={() => setShowListingForm(true)}
+                className="px-6 py-3 bg-bitcoin-orange text-white font-semibold rounded-lg hover:bg-orange-600 transition-colors"
+              >
+                Create Listing
+              </button>
+            </div>
+          )}
+
+          {/* Error State */}
+          {!isLoadingListings && listings.length === 0 && listingsError && (
+            <div className="text-center py-16">
+              <div className="text-6xl mb-4">⚠️</div>
+              <div className="text-lg text-gray-600 mb-2">
+                Unable to load listings
+              </div>
+              <div className="text-sm text-gray-500">{listingsError}</div>
+            </div>
+          )}
+
+          {/* Listing Success Message */}
+          {listingSuccess && (
+            <div className="mt-8 bg-green-50 border border-green-200 rounded-lg p-6 text-center">
+              <h3 className="text-xl font-bold mb-4 font-archivo-black text-green-800">
+                Listing Published Successfully!
+              </h3>
+              <div className="space-y-2 text-sm text-green-700">
+                <p>
+                  <strong>Event ID:</strong>{" "}
+                  {listingSuccess.eventId.substring(0, 20)}...
+                </p>
+                <p className="break-all">
+                  <strong>Nostr Address:</strong> {listingSuccess.naddr}
+                </p>
+              </div>
+              <button
+                onClick={() => setListingSuccess(null)}
+                className="mt-4 px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {/* CTA for Listings */}
+          <section className="mt-16 bg-gradient-to-r from-gray-50 to-orange-50 border border-gray-200 rounded-lg p-8 text-center">
+            <h3 className="text-2xl font-bold mb-4 font-archivo-black">
+              Have Something to Sell?
+            </h3>
+            <p className="text-gray-600 mb-6 max-w-2xl mx-auto">
+              Post a classified listing on the Nostr network. Bitcoiners can buy,
+              sell, and trade goods and services.
+            </p>
+            <div className="flex flex-col sm:flex-row gap-4 justify-center">
+              <button
+                onClick={() => setShowListingForm(true)}
+                className="px-6 py-3 bg-bitcoin-orange text-white font-semibold rounded-lg hover:bg-orange-600 transition-colors focus:outline-none focus:ring-2 focus:ring-bitcoin-orange focus:ring-offset-2"
+              >
+                Create Listing
+              </button>
+              {!user && (
+                <p className="text-sm text-gray-500 self-center">
+                  Connect your Nostr account to create listings
+                </p>
+              )}
+            </div>
+          </section>
+
+          {/* Listing Form Modal */}
+          {showListingForm && (
+            <ListingForm
+              onClose={() => {
+                setShowListingForm(false);
+                setEditListing(null);
+                setIsEditListing(false);
+              }}
+              onSuccess={(data) => {
+                setListingSuccess(data);
+                setShowListingForm(false);
+                setEditListing(null);
+                setIsEditListing(false);
+              }}
+              editListing={editListing}
+              isEdit={isEditListing}
+            />
+          )}
+
+          {/* Listing Detail Modal */}
+          {selectedListing && (
+            <ListingDetailModal
+              listing={selectedListing}
+              onClose={() => setSelectedListing(null)}
+              onDelete={
+                user && selectedListing.pubkey === user.pubkey
+                  ? () => {
+                      if (
+                        window.confirm(
+                          `Are you sure you want to delete "${selectedListing.title}"?`,
+                        )
+                      ) {
+                        handleDeleteListing(selectedListing);
+                        setSelectedListing(null);
+                      }
+                    }
+                  : undefined
+              }
+              onEdit={
+                user && selectedListing.pubkey === user.pubkey
+                  ? () => {
+                      setEditListing(selectedListing);
+                      setIsEditListing(true);
+                      setShowListingForm(true);
+                      setSelectedListing(null);
+                    }
+                  : undefined
+              }
+              onAddToCart={() => addToCart(selectedListing)}
+              onBuyNow={
+                selectedListing.price
+                  ? async () => {
+                      const amount = await fiatToSats(
+                        parseFloat(selectedListing.price!.amount),
+                        selectedListing.price!.currency,
+                      );
+                      setZapTarget({
+                        pubkey: selectedListing.pubkey,
+                        eventId: selectedListing.id,
+                        amount,
+                      });
+                    }
+                  : undefined
+              }
+            />
+          )}
+
+          {/* Cart Badge (floating, shop pages only) */}
+          <CartBadge onCheckout={handleCheckout} />
+
+          {/* Zap Modal for Buy Now / Checkout */}
+          {zapTarget && (
+            <ZapModal
+              event={{ id: zapTarget.eventId, pubkey: zapTarget.pubkey, kind: 30402, content: "", tags: [], created_at: Math.floor(Date.now() / 1000) }}
+              isOpen={true}
+              defaultAmount={zapTarget.amount}
+              onClose={checkoutQueue.length > 0 ? handleCheckoutCancel : () => setZapTarget(null)}
+              signEvent={signEvent}
+              pubkey={user?.pubkey ?? null}
+              onZapConfirmed={
+                checkoutQueue.length > 0
+                  ? handleCheckoutZapConfirmed
+                  : () => {
+                      // Buy Now — send order DM to seller
+                      if (zapTarget && user?.pubkey) {
+                        // Find the listing for this zap target
+                        const listing = listings.find((l) => l.id === zapTarget.eventId);
+                        if (listing) {
+                          sendOrderDM({
+                            sellerPubkey: listing.pubkey,
+                            buyerPubkey: user.pubkey,
+                            listingTitle: listing.title,
+                            listingCoordinate: listing.coordinate,
+                            amountSats: zapTarget.amount,
+                          });
+                        }
+                      }
+                      setZapTarget(null);
+                    }
+              }
+            />
+          )}
+        </>
       )}
     </div>
   );
