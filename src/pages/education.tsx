@@ -197,10 +197,14 @@ export default function EducationPage() {
   );
 
   // Watch the event store for live streams and cast to Stream class
+  // Only show streams with status "live" — filter out "ended" and "planned"
   const livestreams = use$(() =>
-    eventStore.timeline(liveStreamFilters).pipe(castTimelineStream(Stream, eventStore)),
+    eventStore.timeline(liveStreamFilters).pipe(
+      castTimelineStream(Stream, eventStore),
+    ),
     [liveStreamFilters]
   )
+  const activeStreams = useMemo(() => (livestreams ?? []).filter(s => s.status === "live"), [livestreams]);
 
   const loadAll = useCallback(async () => {
     setLoadingFeatured(true);
@@ -328,18 +332,7 @@ export default function EducationPage() {
         <link rel="icon" href={`${basePath}/favicon.ico`} />
       </Head>
 
-      <div className="container mx-auto px-4 py-12 max-w-6xl">
-        {/* Header */}
-        <div className="text-center mb-12">
-          <h1 className="text-4xl md:text-5xl font-black bitcoin-orange mb-4 font-archivo-black">
-            Education Resources
-          </h1>
-          <p className="text-lg text-gray-600 max-w-2xl mx-auto">
-            Curated collections of educational content, articles, links, and
-            media bitcoin.
-          </p>
-        </div>
-
+      <div className="container mx-auto px-4 py-6 max-w-6xl">
         {/* Article detail modal overlay */}
         {selectedArticle &&
           (() => {
@@ -423,7 +416,7 @@ export default function EducationPage() {
 
         {/* Active Livestreams */}
         <ErrorBoundary>
-          <LivestreamPlayer streams={livestreams ?? []} />
+          <LivestreamPlayer streams={activeStreams} />
         </ErrorBoundary>
 
         {/* Tab Navigation */}
