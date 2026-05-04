@@ -40,7 +40,7 @@ jobs:
           node scripts/post-build.js
         env:
           NEXT_SHARP_REQUIRE_CDN: 1
-          BASE_PATH: /bodarc
+          BASE_PATH: /meshtadel-v2
 
       - name: Add .nojekyll
         run: touch out/.nojekyll
