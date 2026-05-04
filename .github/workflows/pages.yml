@@ -1,4 +1,4 @@
-name: GitHub Pages
+name: Deploy to GitHub Pages
 
 on:
   push:
@@ -21,26 +21,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Install dependencies
-        run: npm install
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
 
-      - name: Build
-        run: npm run build
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and post-process
+        run: |
+          pnpm run build
+          node scripts/post-build.js
         env:
           NEXT_SHARP_REQUIRE_CDN: 1
+          BASE_PATH: /meshtadel
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
+      - name: Add .nojekyll
+        run: touch out/.nojekyll
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./out
+          path: out
 
   deploy:
     environment:
